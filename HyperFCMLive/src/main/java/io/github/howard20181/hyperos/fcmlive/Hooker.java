@@ -18,7 +18,7 @@ public class Hooker extends XposedModule {
     private static final List<String> CN_DEFER_BROADCAST = Arrays.asList("com.google.android.intent.action.GCM_RECONNECT", "com.google.android.gcm.DISCONNECTED", "com.google.android.gcm.CONNECTED", "com.google.android.gms.gcm.HEARTBEAT_ALARM");
     private static final String ACTION_REMOTE_INTENT = "com.google.android.c2dm.intent.RECEIVE";
     private static final String GMS_PACKAGE_NAME = "com.google.android.gms";
-    private static final String GMS_PERSISTENT_PROCESS_NAME = "com.google.android.gms:persistent";
+    private static final String GMS_PERSISTENT_PROCESS_NAME = "com.google.android.gms.persistent";
 
     @Override
     public void onSystemServerStarting(@NonNull SystemServerStartingParam param) {
@@ -58,8 +58,10 @@ public class Hooker extends XposedModule {
         var GreezeManagerServiceClass = classLoader.loadClass("com.miui.server.greeze.GreezeManagerService");
         try {
             // boolean isAllowBroadcast(int callerUid, String callerPkgName, int calleeUid, String calleePkgName, String action)
+            // BroadcastProcessQueue queue, am.ProcessRecord app = queue.app, app nullable but when app is null, this method will not call
+            // calleePkgName = (app.info == null || app.info.packageName == null) ? app.processName : app.info.packageName
             var isAllowBroadcastMethod = GreezeManagerServiceClass.getDeclaredMethod("isAllowBroadcast", int.class, String.class, int.class, String.class, String.class);
-            hook(isAllowBroadcastMethod).intercept(chain -> {
+            hook(isAllowBroadcastMethod).intercept(chain -> { // why contains? see above about where calleePkgName come from
                 if (chain.getArg(3) instanceof String calleePkgName && calleePkgName.contains(GMS_PACKAGE_NAME)) {
                     try {
                         if (chain.getArg(4) instanceof String action
@@ -143,9 +145,10 @@ public class Hooker extends XposedModule {
         var checkApplicationAutoStartMethod = BroadcastQueueModernStubImplClass.getDeclaredMethod("checkApplicationAutoStart", BroadcastQueueClass, BroadcastRecordClass, ResolveInfo.class);
         hook(checkApplicationAutoStartMethod).intercept(chain -> {
             try {
-                if (callerPackageField.get(chain.getArg(1)) instanceof String callerPackage
-                        && callerPackage.equals(GMS_PACKAGE_NAME)
-                        && intentField.get(chain.getArg(1)) instanceof Intent intent
+                var broadcastRecord = chain.getArg(1);
+                if (callerPackageField.get(broadcastRecord) instanceof String callerPackage
+                        && GMS_PACKAGE_NAME.equals(callerPackage) // BroadcastRecord.callerPackage nullable
+                        && intentField.get(broadcastRecord) instanceof Intent intent
                         && ACTION_REMOTE_INTENT.equals(intent.getAction())) {
                     return true;
                 }
