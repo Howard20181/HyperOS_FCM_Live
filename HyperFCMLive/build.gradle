@@ -1,0 +1,83 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    compileSdk 36
+
+    defaultConfig {
+        applicationId namespace
+        minSdkVersion 34
+        targetSdkVersion 36
+        versionCode rootProject.ext.commitCount
+        versionName "1.0.0"
+    }
+
+    Properties localProperties = new Properties()
+    if (project.rootProject.file('local.properties').exists()) {
+        localProperties.load(project.rootProject.file('local.properties').newDataInputStream())
+    }
+
+    signingConfigs {
+        if (localProperties.getProperty("storeFile") != null) {
+            config {
+                storeFile project.rootProject.file(localProperties.getProperty("storeFile"))
+                storePassword localProperties.getProperty("storePassword")
+                keyAlias localProperties.getProperty("keyAlias")
+                keyPassword localProperties.getProperty("keyPassword")
+            }
+        }
+    }
+
+    buildTypes {
+        debug {
+            if (localProperties.getProperty("storeFile") != null) {
+                signingConfig signingConfigs.config
+            }
+        }
+        release {
+            if (localProperties.getProperty("storeFile") != null) {
+                signingConfig signingConfigs.config
+            } else {
+                signingConfig signingConfigs.debug
+            }
+            minifyEnabled true
+            proguardFiles 'proguard-rules.pro'
+            vcsInfo.include false
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_21
+        targetCompatibility JavaVersion.VERSION_21
+    }
+
+    dependenciesInfo {
+        includeInApk false
+        includeInBundle false
+    }
+
+    packagingOptions {
+        resources {
+            excludes += ['kotlin/**', 'META-INF/androidx/**']
+        }
+    }
+
+    lint {
+        checkReleaseBuilds false
+    }
+
+    dependenciesInfo.includeInApk false
+    enableKotlin = false
+    namespace 'io.github.howard20181.hyperos.fcmlive'
+}
+
+base {
+    archivesName = project.name + "-" + android.defaultConfig.versionName + "." + android.defaultConfig.versionCode
+}
+
+dependencies {
+    compileOnly 'androidx.annotation:annotation:1.9.1'
+    compileOnly 'io.github.libxposed:api:101.0.0'
+//    implementation 'io.github.libxposed:service:101.0.0'
+}

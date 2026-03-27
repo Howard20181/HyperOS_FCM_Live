@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Fix HyperOS FCM reconnection</string>
+    <string name="xposed_description">Remove HyperOS\'s restrictions on FCM connection-related broadcasts. System power consumption may increase when this module is enabled.</string>
+</resources>
