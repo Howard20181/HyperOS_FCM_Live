@@ -1,5 +1,8 @@
 package io.github.howard20181.hyperos.fcmlive;
 
+import android.annotation.SuppressLint;
+import android.content.Intent;
+import android.content.pm.ResolveInfo;
 import android.util.Log;
 
 import androidx.annotation.NonNull;
@@ -9,9 +12,13 @@ import java.util.List;
 
 import io.github.libxposed.api.XposedModule;
 
+@SuppressLint("PrivateApi")
 public class Hooker extends XposedModule {
     private static final String TAG = "HyperGreeze";
     private static final List<String> CN_DEFER_BROADCAST = Arrays.asList("com.google.android.intent.action.GCM_RECONNECT", "com.google.android.gcm.DISCONNECTED", "com.google.android.gcm.CONNECTED", "com.google.android.gms.gcm.HEARTBEAT_ALARM");
+    private static final String ACTION_REMOTE_INTENT = "com.google.android.c2dm.intent.RECEIVE";
+    private static final String GMS_PACKAGE_NAME = "com.google.android.gms";
+    private static final String GMS_PERSISTENT_PROCESS_NAME = "com.google.android.gms:persistent";
 
     @Override
     public void onSystemServerStarting(@NonNull SystemServerStartingParam param) {
@@ -32,6 +39,16 @@ public class Hooker extends XposedModule {
             } catch (Exception t) {
                 log(Log.ERROR, TAG, "Failed to hook ListAppsManager", t);
             }
+            try {
+                hookBroadcastQueueModernStubImpl(classLoader);
+            } catch (Exception e) {
+                log(Log.ERROR, TAG, "Failed to hook BroadcastQueueModernStubImpl", e);
+            }
+            try {
+                hookProcessPolicy(classLoader);
+            } catch (Exception e) {
+                log(Log.ERROR, TAG, "Failed to hook ProcessPolicy", e);
+            }
         } catch (Throwable tr) {
             log(Log.ERROR, TAG, "Failed to hook SystemServer", tr);
         }
@@ -42,12 +59,12 @@ public class Hooker extends XposedModule {
         try {
             // boolean isAllowBroadcast(int callerUid, String callerPkgName, int calleeUid, String calleePkgName, String action)
             var isAllowBroadcastMethod = GreezeManagerServiceClass.getDeclaredMethod("isAllowBroadcast", int.class, String.class, int.class, String.class, String.class);
-            var mScreenOnOffField = GreezeManagerServiceClass.getDeclaredField("mScreenOnOff");
-            mScreenOnOffField.setAccessible(true);
             hook(isAllowBroadcastMethod).intercept(chain -> {
-                if (chain.getArg(3) instanceof String calleePkgName && calleePkgName.contains("com.google.android.gms")) {
+                if (chain.getArg(3) instanceof String calleePkgName && calleePkgName.contains(GMS_PACKAGE_NAME)) {
                     try {
-                        if (chain.getArg(4) instanceof String action && CN_DEFER_BROADCAST.contains(action) || mScreenOnOffField.getBoolean(chain.getThisObject())) {
+                        if (chain.getArg(4) instanceof String action
+                                && (ACTION_REMOTE_INTENT.equals(action)
+                                || CN_DEFER_BROADCAST.contains(action))) {
                             return true;
                         }
                     } catch (Exception e) {
@@ -60,15 +77,26 @@ public class Hooker extends XposedModule {
         } catch (Exception e) {
             log(Log.ERROR, TAG, "Failed to hook GreezeManagerService#isAllowBroadcast, trying isAllowBroadcastV2", e);
         }
-        // boolean deferBroadcastForMiui(String action)
-        var deferBroadcastForMiuiMethod = GreezeManagerServiceClass.getDeclaredMethod("deferBroadcastForMiui", String.class);
-        hook(deferBroadcastForMiuiMethod).intercept(chain -> {
-            if (chain.getArg(0) instanceof String action && CN_DEFER_BROADCAST.contains(action)) {
-                return false;
-            }
-            return chain.proceed();
+        try {
+            // boolean deferBroadcastForMiui(String action)
+            var deferBroadcastForMiuiMethod = GreezeManagerServiceClass.getDeclaredMethod("deferBroadcastForMiui", String.class);
+            hook(deferBroadcastForMiuiMethod).intercept(chain -> {
+                if (chain.getArg(0) instanceof String action && CN_DEFER_BROADCAST.contains(action)) {
+                    return false;
+                }
+                return chain.proceed();
+            });
+            deoptimize(deferBroadcastForMiuiMethod);
+        } catch (Exception e) {
+            log(Log.ERROR, TAG, "Failed to hook GreezeManagerService#deferBroadcastForMiui", e);
+        }
+        var triggerGMSLimitActionMethod = GreezeManagerServiceClass.getDeclaredMethod("triggerGMSLimitAction", boolean.class);
+        hook(triggerGMSLimitActionMethod).intercept(chain -> {
+            var args = chain.getArgs().toArray();
+            args[0] = false;
+            return chain.proceed(args);
         });
-        deoptimize(deferBroadcastForMiuiMethod);
+        deoptimize(triggerGMSLimitActionMethod);
     }
 
     private void hookDomesticPolicyManager(ClassLoader classLoader) throws ClassNotFoundException, NoSuchMethodException {
@@ -92,7 +120,7 @@ public class Hooker extends XposedModule {
                     try {
                         List<String> mSystemBlackList = (List<String>) mSystemBlackListField.get(chain.getThisObject());
                         if (mSystemBlackList != null) {
-                            mSystemBlackList.remove("com.google.android.gms");
+                            mSystemBlackList.remove(GMS_PACKAGE_NAME);
                         }
                     } catch (Exception e) {
                         log(Log.ERROR, TAG, "Failed to modify ListAppsManager$PowerStrategyMode constructor", e);
@@ -101,5 +129,47 @@ public class Hooker extends XposedModule {
             });
             deoptimize(constructor);
         }
+    }
+
+    private void hookBroadcastQueueModernStubImpl(ClassLoader classLoader) throws
+            ClassNotFoundException, NoSuchMethodException, NoSuchFieldException {
+        var BroadcastQueueModernStubImplClass = classLoader.loadClass("com.android.server.am.BroadcastQueueModernStubImpl");
+        var BroadcastQueueClass = classLoader.loadClass("com.android.server.am.BroadcastQueue");
+        var BroadcastRecordClass = classLoader.loadClass("com.android.server.am.BroadcastRecord");
+        var callerPackageField = BroadcastRecordClass.getDeclaredField("callerPackage");
+        callerPackageField.setAccessible(true);
+        var intentField = BroadcastRecordClass.getDeclaredField("intent");
+        intentField.setAccessible(true);
+        var checkApplicationAutoStartMethod = BroadcastQueueModernStubImplClass.getDeclaredMethod("checkApplicationAutoStart", BroadcastQueueClass, BroadcastRecordClass, ResolveInfo.class);
+        hook(checkApplicationAutoStartMethod).intercept(chain -> {
+            try {
+                if (callerPackageField.get(chain.getArg(1)) instanceof String callerPackage
+                        && callerPackage.equals(GMS_PACKAGE_NAME)
+                        && intentField.get(chain.getArg(1)) instanceof Intent intent
+                        && ACTION_REMOTE_INTENT.equals(intent.getAction())) {
+                    return true;
+                }
+            } catch (Exception e) {
+                log(Log.ERROR, TAG, "Failed to modify BroadcastQueueModernStubImpl#checkApplicationAutoStart", e);
+            }
+            return chain.proceed();
+        });
+        deoptimize(checkApplicationAutoStartMethod);
+    }
+
+    private void hookProcessPolicy(ClassLoader classLoader) throws ClassNotFoundException, NoSuchMethodException {
+        var ProcessPolicyClass = classLoader.loadClass("com.android.server.am.ProcessPolicy");
+        var getWhiteListMethod = ProcessPolicyClass.getDeclaredMethod("getWhiteList", int.class);
+        hook(getWhiteListMethod).intercept(chain -> {
+            var result = chain.proceed();
+            if (chain.getArg(0) instanceof Integer flags && (flags & 1) != 0) {
+                if (result instanceof List<?>) {
+                    List<String> whiteList = (List<String>) result;
+                    whiteList.add(GMS_PACKAGE_NAME);
+                    whiteList.add(GMS_PERSISTENT_PROCESS_NAME);
+                }
+            }
+            return result;
+        });
     }
 }
