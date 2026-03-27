@@ -27,28 +27,41 @@ public class Hooker extends XposedModule {
             } catch (Exception t) {
                 log(Log.ERROR, TAG, "Failed to hook DomesticPolicyManager", t);
             }
+            try {
+                hookListAppsManager(classLoader);
+            } catch (Exception t) {
+                log(Log.ERROR, TAG, "Failed to hook ListAppsManager", t);
+            }
         } catch (Throwable tr) {
             log(Log.ERROR, TAG, "Failed to hook SystemServer", tr);
         }
     }
 
-    private void hookGreezeManagerService(ClassLoader classLoader) throws ClassNotFoundException, NoSuchMethodException, NoSuchFieldException {
+    private void hookGreezeManagerService(ClassLoader classLoader) throws ClassNotFoundException, NoSuchMethodException {
         var GreezeManagerServiceClass = classLoader.loadClass("com.miui.server.greeze.GreezeManagerService");
-        // boolean isAllowBroadcast(int callerUid, String callerPkgName, int calleeUid, String calleePkgName, String action)
-        var isAllowBroadcastMethod = GreezeManagerServiceClass.getDeclaredMethod("isAllowBroadcast", int.class, String.class, int.class, String.class, String.class);
+        try {
+            // boolean isAllowBroadcast(int callerUid, String callerPkgName, int calleeUid, String calleePkgName, String action)
+            var isAllowBroadcastMethod = GreezeManagerServiceClass.getDeclaredMethod("isAllowBroadcast", int.class, String.class, int.class, String.class, String.class);
+            var mScreenOnOffField = GreezeManagerServiceClass.getDeclaredField("mScreenOnOff");
+            mScreenOnOffField.setAccessible(true);
+            hook(isAllowBroadcastMethod).intercept(chain -> {
+                if (chain.getArg(3) instanceof String calleePkgName && calleePkgName.contains("com.google.android.gms")) {
+                    try {
+                        if (chain.getArg(4) instanceof String action && CN_DEFER_BROADCAST.contains(action) || mScreenOnOffField.getBoolean(chain.getThisObject())) {
+                            return true;
+                        }
+                    } catch (Exception e) {
+                        log(Log.ERROR, TAG, "Failed to modify GreezeManagerService#isAllowBroadcast", e);
+                    }
+                }
+                return chain.proceed();
+            });
+            deoptimize(isAllowBroadcastMethod);
+        } catch (Exception e) {
+            log(Log.ERROR, TAG, "Failed to hook GreezeManagerService#isAllowBroadcast, trying isAllowBroadcastV2", e);
+        }
         // boolean deferBroadcastForMiui(String action)
         var deferBroadcastForMiuiMethod = GreezeManagerServiceClass.getDeclaredMethod("deferBroadcastForMiui", String.class);
-        var mScreenOnOffField = GreezeManagerServiceClass.getDeclaredField("mScreenOnOff");
-        mScreenOnOffField.setAccessible(true);
-        hook(isAllowBroadcastMethod).intercept(chain -> {
-            if (chain.getArg(3) instanceof String calleePkgName && calleePkgName.contains("com.google.android.gms")) {
-                var mScreenOnOff = mScreenOnOffField.getBoolean(chain.getThisObject());
-                if (mScreenOnOff && chain.getArg(4) instanceof String action && CN_DEFER_BROADCAST.contains(action))
-                    return true;
-            }
-            return chain.proceed();
-        });
-        deoptimize(isAllowBroadcastMethod);
         hook(deferBroadcastForMiuiMethod).intercept(chain -> {
             if (chain.getArg(0) instanceof String action && CN_DEFER_BROADCAST.contains(action)) {
                 return false;
@@ -64,5 +77,29 @@ public class Hooker extends XposedModule {
         var deferBroadcastMethod = DomesticPolicyManagerClass.getDeclaredMethod("deferBroadcast", String.class);
         hook(deferBroadcastMethod).intercept(chain -> false);
         deoptimize(deferBroadcastMethod);
+    }
+
+    private void hookListAppsManager(ClassLoader classLoader) throws ClassNotFoundException, NoSuchFieldException {
+        var ListAppsManagerClass = classLoader.loadClass("com.miui.server.greeze.power.ListAppsManager");
+        var mSystemBlackListField = ListAppsManagerClass.getDeclaredField("mSystemBlackList");
+        mSystemBlackListField.setAccessible(true);
+        var PowerStrategyModeConstructors = ListAppsManagerClass.getDeclaredConstructors();
+        for (var constructor : PowerStrategyModeConstructors) {
+            hook(constructor).intercept(chain -> {
+                try {
+                    return chain.proceed();
+                } finally {
+                    try {
+                        List<String> mSystemBlackList = (List<String>) mSystemBlackListField.get(chain.getThisObject());
+                        if (mSystemBlackList != null) {
+                            mSystemBlackList.remove("com.google.android.gms");
+                        }
+                    } catch (Exception e) {
+                        log(Log.ERROR, TAG, "Failed to modify ListAppsManager$PowerStrategyMode constructor", e);
+                    }
+                }
+            });
+            deoptimize(constructor);
+        }
     }
 }
