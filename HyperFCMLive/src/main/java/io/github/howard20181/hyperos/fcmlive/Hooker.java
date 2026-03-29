@@ -234,5 +234,8 @@ public class Hooker extends XposedModule {
         var updateGmsNetWorkMethod = GmsObserverClass.getDeclaredMethod("updateGmsNetWork", boolean.class);
         hook(updateGmsNetWorkMethod).intercept(hooker);
         deoptimize(updateGmsNetWorkMethod);
+        var updateGoogleReletivesWakelockMethod = GmsObserverClass.getDeclaredMethod("updateGoogLeReletivesWakelock", boolean.class);
+        hook(updateGoogleReletivesWakelockMethod).intercept(hooker);
+        deoptimize(updateGoogleReletivesWakelockMethod);
     }
 }
