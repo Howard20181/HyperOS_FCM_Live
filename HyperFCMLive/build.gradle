@@ -77,7 +77,7 @@ base {
 }
 
 dependencies {
-    compileOnly 'androidx.annotation:annotation:1.9.1'
+    compileOnly 'androidx.annotation:annotation:1.10.0'
     compileOnly 'io.github.libxposed:api:101.0.0'
 //    implementation 'io.github.libxposed:service:101.0.0'
     compileOnly project(":hiddenapi:stubs")
