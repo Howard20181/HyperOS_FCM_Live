@@ -10,7 +10,7 @@ android {
         minSdkVersion 27
         targetSdkVersion 37
         versionCode rootProject.ext.commitCount
-        versionName "1.3.2"
+        versionName "1.4.0"
     }
 
     Properties localProperties = new Properties()
