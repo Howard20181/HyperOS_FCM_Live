@@ -28,8 +28,11 @@ public class Hooker extends XposedModule {
     private static final String ACTION_REMOTE_INTENT = "com.google.android.c2dm.intent.RECEIVE";
     private static final String GMS_PACKAGE_NAME = "com.google.android.gms";
     private static final String GMS_PERSISTENT_PROCESS_NAME = "com.google.android.gms.persistent";
-    private PackageReadyParam param;
+    private PackageClassLoader param;
     private final Set<String> hookedIds = new HashSet<>();
+
+    private record PackageClassLoader(String packageName, ClassLoader classLoader) {
+    }
 
     private void setHookId(HookBuilder builder, String id) {
         if (getApiVersion() >= 102) {
@@ -41,6 +44,7 @@ public class Hooker extends XposedModule {
     @Override
     public void onSystemServerStarting(@NonNull SystemServerStartingParam param) {
         var classLoader = param.getClassLoader();
+        this.param = new PackageClassLoader("system", classLoader);
         try {
             hookSystemServer(classLoader);
         } catch (Throwable tr) {
@@ -88,10 +92,12 @@ public class Hooker extends XposedModule {
 
     @Override
     public void onPackageReady(@NonNull PackageReadyParam param) {
-        this.param = param;
         if (!param.isFirstPackage()) return;
+        var packageName = param.getPackageName();
+        var classLoader = param.getClassLoader();
+        this.param = new PackageClassLoader(packageName, classLoader);
         try {
-            hookPackage(param.getPackageName(), param.getClassLoader());
+            hookPackage(packageName, classLoader);
         } catch (Throwable tr) {
             log(Log.ERROR, TAG, "Failed to hook package", tr);
         }
@@ -121,13 +127,14 @@ public class Hooker extends XposedModule {
     @Override
     public void onHotReloaded(@NonNull HotReloadedParam param) {
         var isSystemServer = param.isSystemServer();
-        if (param.getSavedInstanceState() instanceof PackageReadyParam packageReadyParam) {
-            var classLoader = packageReadyParam.getClassLoader();
+        if (param.getSavedInstanceState() instanceof PackageClassLoader(
+                String packageName, ClassLoader classLoader
+        )) {
             try {
                 if (isSystemServer) {
                     hookSystemServer(classLoader);
                 } else {
-                    hookPackage(packageReadyParam.getPackageName(), classLoader);
+                    hookPackage(packageName, classLoader);
                 }
             } catch (Throwable tr) {
                 log(Log.ERROR, TAG, "Hot reload failed", tr);
