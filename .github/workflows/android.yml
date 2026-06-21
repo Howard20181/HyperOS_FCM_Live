@@ -13,15 +13,8 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
-          fetch-depth: 0
-
-      - name: Checkout libxposed/api
-        uses: actions/checkout@v6
-        with:
-          repository: libxposed/api
-          path: libxposed/api
           fetch-depth: 0
 
       - name: set up JDK 21
@@ -42,19 +35,20 @@ jobs:
           fi
 
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v5
-
-      - name: Build libxposed/api
-        working-directory: libxposed/api
-        run: |
-          ./gradlew publishToMavenLocal
+        uses: gradle/actions/setup-gradle@v6
 
       - name: Build with Gradle
         run: |
           ./gradlew assemble
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v6
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v7
         with:
-          name: Signed app bundle
-          path: HyperFCMLive/build/outputs/apk
+          path: HyperFCMLive/build/outputs/apk/release/*.apk
+          archive: false
+
+      - name: Upload debug artifact
+        uses: actions/upload-artifact@v7
+        with:
+          path: HyperFCMLive/build/outputs/apk/debug/*.apk
+          archive: false
