@@ -29,7 +29,8 @@ public class MainActivity extends Activity implements SearchView.OnQueryTextList
     private Set<String> allowlist = new HashSet<>();
     private AppListAdapter adapter;
     private SearchView searchView;
-    private boolean showSystemApps = true;
+    // Don't show system apps by default; toggle to include them.
+    private boolean showSystemApps = false;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -38,7 +39,6 @@ public class MainActivity extends Activity implements SearchView.OnQueryTextList
         setTitle(R.string.settings_title);
 
         allowlist = Prefs.readAllowlist(this);
-        loadApps();
 
         adapter = new AppListAdapter(this, filteredApps, (pkg, checked) -> {
             if (checked) {
@@ -66,15 +66,16 @@ public class MainActivity extends Activity implements SearchView.OnQueryTextList
         cbSystemApps.setChecked(showSystemApps);
         cbSystemApps.setOnCheckedChangeListener((buttonView, isChecked) -> {
             showSystemApps = isChecked;
+            // loadApps runs off the main thread and refreshes the list on completion.
             loadApps();
-            filterApps(searchView.getQuery().toString());
-            adapter.notifyDataSetChanged();
         });
 
         Button selectAll = findViewById(R.id.btn_select_all);
         Button clearAll = findViewById(R.id.btn_clear_all);
         selectAll.setOnClickListener(v -> setAllChecked(true));
         clearAll.setOnClickListener(v -> setAllChecked(false));
+
+        loadApps();
     }
 
     @Override
@@ -147,34 +148,45 @@ public class MainActivity extends Activity implements SearchView.OnQueryTextList
     }
 
     private void loadApps() {
-        allApps.clear();
-        filteredApps.clear();
-        PackageManager pm = getPackageManager();
-        // Use getInstalledPackages instead of getInstalledApplications for better
-        // MIUI compatibility. On some MIUI versions, getInstalledApplications
-        // doesn't return all user-installed apps.
-        java.util.List<android.content.pm.PackageInfo> installed =
-                pm.getInstalledPackages(0);
-        for (android.content.pm.PackageInfo pi : installed) {
-            ApplicationInfo ai = pi.applicationInfo;
-            // Skip the module's own package (it's never FCM-targeted by GMS).
-            if (ai.packageName.equals(getPackageName())) {
-                continue;
+        // Query the package manager and load labels off the main thread so the
+        // first open of the screen stays responsive. Icons are loaded lazily by
+        // the adapter, so only the lightweight query/label work happens here.
+        final boolean showSys = showSystemApps;
+        new Thread(() -> {
+            PackageManager pm = getPackageManager();
+            java.util.List<android.content.pm.PackageInfo> installed =
+                    pm.getInstalledPackages(0);
+            java.util.List<AppListAdapter.AppEntry> result = new ArrayList<>();
+            for (android.content.pm.PackageInfo pi : installed) {
+                ApplicationInfo ai = pi.applicationInfo;
+                // Skip the module's own package (it's never FCM-targeted by GMS).
+                if (ai.packageName.equals(getPackageName())) {
+                    continue;
+                }
+                // By default, only show user apps. Toggle to show system apps.
+                if (!showSys && isSystemApp(ai)) {
+                    continue;
+                }
+                result.add(new AppListAdapter.AppEntry(
+                        ai.packageName, ai.loadLabel(pm).toString()));
             }
-            // By default, only show user apps. Toggle to show system apps.
-            if (!showSystemApps && isSystemApp(ai)) {
-                continue;
+            for (AppListAdapter.AppEntry app : result) {
+                app.checked = allowlist.contains(app.packageName);
             }
-            allApps.add(new AppListAdapter.AppEntry(
-                    ai.packageName,
-                    ai.loadLabel(pm).toString(),
-                    ai.loadIcon(pm)));
-        }
-        for (AppListAdapter.AppEntry app : allApps) {
-            app.checked = allowlist.contains(app.packageName);
-        }
-        sortApps();
-        // Initially show all apps
-        filteredApps.addAll(allApps);
+            // Checked (allowlisted) apps first, then label alphabetically.
+            result.sort((a, b) -> {
+                if (a.checked != b.checked) {
+                    return a.checked ? -1 : 1;
+                }
+                int c = a.label.compareToIgnoreCase(b.label);
+                return c != 0 ? c : a.packageName.compareTo(b.packageName);
+            });
+            runOnUiThread(() -> {
+                allApps.clear();
+                allApps.addAll(result);
+                filterApps(searchView != null ? searchView.getQuery().toString() : "");
+                adapter.notifyDataSetChanged();
+            });
+        }).start();
     }
 }
