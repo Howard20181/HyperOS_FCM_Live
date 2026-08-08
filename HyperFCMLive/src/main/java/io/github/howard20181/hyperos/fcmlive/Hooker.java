@@ -1,8 +1,10 @@
 package io.github.howard20181.hyperos.fcmlive;
 
 import android.annotation.SuppressLint;
+import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.ResolveInfo;
 import android.os.Build;
@@ -32,7 +34,6 @@ public class Hooker extends XposedModule {
     private PackageClassLoader param;
     private final Set<String> hookedIds = new HashSet<>();
     private Context systemContext;
-    private Context moduleContext;
 
     private record PackageClassLoader(String packageName, ClassLoader classLoader) {
     }
@@ -56,6 +57,11 @@ public class Hooker extends XposedModule {
     }
 
     private void hookSystemServer(ClassLoader classLoader) {
+        try {
+            hookAllowlist();
+        } catch (Exception t) {
+            log(Log.ERROR, TAG, "Failed to hook allowlist receiver", t);
+        }
         try {
             hookGreezeManagerService(classLoader);
         } catch (Exception t) {
@@ -418,9 +424,7 @@ public class Hooker extends XposedModule {
     }
 
     /**
-     * A Context in system_server. Used as the parent for
-     * {@code createPackageContext(Prefs.MODULE_PKG, 0)} so the hooks can read the
-     * module's SharedPreferences (the FCM wake whitelist) across processes.
+     * A Context in system_server (ActivityThread.currentApplication()).
      */
     private Context getSystemContext() {
         if (systemContext == null) {
@@ -437,34 +441,53 @@ public class Hooker extends XposedModule {
         return systemContext;
     }
 
-    private Context getModuleContext() {
-        if (moduleContext == null) {
-            Context sys = getSystemContext();
-            if (sys != null) {
-                try {
-                    moduleContext = sys.createPackageContext(Prefs.MODULE_PKG, 0);
-                } catch (Exception e) {
-                    log(Log.ERROR, TAG, "Failed to get module context", e);
-                }
-            }
+    /**
+     * Package names the user allows FCM to wake / auto-launch, kept in memory in
+     * system_server. Loaded from libxposed's cross-process remote preferences and
+     * refreshed whenever the app broadcasts {@link Prefs#ACTION_ALLOWLIST_CHANGED}.
+     */
+    private static volatile Set<String> sAllowlist = Collections.emptySet();
+
+    /** Re-read the allowlist from the shared remote preferences. */
+    private void loadAllowlistFromRemotePrefs() {
+        try {
+            Set<String> set = getRemotePreferences(Prefs.GROUP_CONFIG)
+                    .getStringSet(Prefs.KEY_ALLOWLIST, Collections.emptySet());
+            sAllowlist = set != null ? new HashSet<>(set) : new HashSet<>();
+        } catch (Exception e) {
+            log(Log.ERROR, TAG, "Failed to read remote allowlist", e);
         }
-        return moduleContext;
     }
 
-    /**
-     * Package names the user allows FCM to wake / auto-launch. Empty until the
-     * user picks apps in the module settings; apps not in this set are never woken.
-     */
-    private Set<String> getFcmAllowlist() {
-        Context ctx = getModuleContext();
-        if (ctx == null) {
-            return Collections.emptySet();
-        }
+    /** Called from hookSystemServer: load the allowlist and refresh on app updates. */
+    private void hookAllowlist() {
         try {
-            return Prefs.readAllowlist(ctx);
+            loadAllowlistFromRemotePrefs();
+            Context sys = getSystemContext();
+            if (sys == null) {
+                return;
+            }
+            BroadcastReceiver receiver = new BroadcastReceiver() {
+                @Override
+                public void onReceive(Context context, Intent intent) {
+                    if (Prefs.ACTION_ALLOWLIST_CHANGED.equals(intent.getAction())) {
+                        loadAllowlistFromRemotePrefs();
+                    }
+                }
+            };
+            IntentFilter filter = new IntentFilter(Prefs.ACTION_ALLOWLIST_CHANGED);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                sys.registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED);
+            } else {
+                sys.registerReceiver(receiver, filter);
+            }
         } catch (Exception e) {
-            return Collections.emptySet();
+            log(Log.ERROR, TAG, "Failed to hook allowlist receiver", e);
         }
+    }
+
+    private Set<String> getFcmAllowlist() {
+        return new HashSet<>(sAllowlist);
     }
 
     private void hookActivityManagerService(ClassLoader classLoader) throws ClassNotFoundException,
