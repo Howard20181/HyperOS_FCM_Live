@@ -15,6 +15,7 @@ import androidx.annotation.RequiresApi;
 
 import java.lang.reflect.Method;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -30,6 +31,8 @@ public class Hooker extends XposedModule {
     private static final String GMS_PERSISTENT_PROCESS_NAME = "com.google.android.gms.persistent";
     private PackageClassLoader param;
     private final Set<String> hookedIds = new HashSet<>();
+    private Context systemContext;
+    private Context moduleContext;
 
     private record PackageClassLoader(String packageName, ClassLoader classLoader) {
     }
@@ -297,7 +300,10 @@ public class Hooker extends XposedModule {
                 if (callerPackageField.get(broadcastRecord) instanceof String callerPackage
                         && GMS_PACKAGE_NAME.equals(callerPackage) // BroadcastRecord.callerPackage nullable
                         && intentField.get(broadcastRecord) instanceof Intent intent
-                        && ACTION_REMOTE_INTENT.equals(intent.getAction())) {
+                        && ACTION_REMOTE_INTENT.equals(intent.getAction())
+                        // Only auto-start apps the user explicitly whitelisted.
+                        && intent.getPackage() instanceof String targetPackage
+                        && getFcmAllowlist().contains(targetPackage)) {
                     return true;
                 }
             } catch (Exception e) {
@@ -411,6 +417,56 @@ public class Hooker extends XposedModule {
         return powerExemptionManager;
     }
 
+    /**
+     * A Context in system_server. Used as the parent for
+     * {@code createPackageContext(Prefs.MODULE_PKG, 0)} so the hooks can read the
+     * module's SharedPreferences (the FCM wake whitelist) across processes.
+     */
+    private Context getSystemContext() {
+        if (systemContext == null) {
+            try {
+                // ActivityThread.currentApplication() is hidden; call via reflection.
+                Class<?> activityThreadClass = Class.forName("android.app.ActivityThread");
+                Method currentApplication = activityThreadClass.getMethod("currentApplication");
+                if (currentApplication.invoke(null) instanceof Context ctx) {
+                    systemContext = ctx;
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        return systemContext;
+    }
+
+    private Context getModuleContext() {
+        if (moduleContext == null) {
+            Context sys = getSystemContext();
+            if (sys != null) {
+                try {
+                    moduleContext = sys.createPackageContext(Prefs.MODULE_PKG, 0);
+                } catch (Exception e) {
+                    log(Log.ERROR, TAG, "Failed to get module context", e);
+                }
+            }
+        }
+        return moduleContext;
+    }
+
+    /**
+     * Package names the user allows FCM to wake / auto-launch. Empty until the
+     * user picks apps in the module settings; apps not in this set are never woken.
+     */
+    private Set<String> getFcmAllowlist() {
+        Context ctx = getModuleContext();
+        if (ctx == null) {
+            return Collections.emptySet();
+        }
+        try {
+            return Prefs.readAllowlist(ctx);
+        } catch (Exception e) {
+            return Collections.emptySet();
+        }
+    }
+
     private void hookActivityManagerService(ClassLoader classLoader) throws ClassNotFoundException,
             NoSuchMethodException, NoSuchFieldException {
         var ActivityManagerServiceClass = classLoader.loadClass("com.android.server.am.ActivityManagerService");
@@ -493,15 +549,18 @@ public class Hooker extends XposedModule {
                         && getInvoker(getRecordMethod).invoke(chain.getThisObject(), chain.getArg(0)) instanceof Object app
                         && infoField.get(app) instanceof ApplicationInfo info
                         && GMS_PACKAGE_NAME.equals(info.packageName)) {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
-                            && intent.getPackage() instanceof String packageName
-                            && mContextField.get(chain.getThisObject()) instanceof Context mContext) {
-                        getPowerExemptionManager(mContext).addToTemporaryAllowList(
-                                packageName, 102 /* PowerExemptionManager.REASON_PUSH_MESSAGING_OVER_QUOTA */,
-                                "GOOGLE_C2DM", 2000);
-                    }
-                    if ((intent.getFlags() & Intent.FLAG_INCLUDE_STOPPED_PACKAGES) == 0) {
-                        intent.addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES);
+                    // Only wake / auto-start apps the user explicitly whitelisted.
+                    if (intent.getPackage() instanceof String targetPackage
+                            && getFcmAllowlist().contains(targetPackage)) {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+                                && mContextField.get(chain.getThisObject()) instanceof Context mContext) {
+                            getPowerExemptionManager(mContext).addToTemporaryAllowList(
+                                    targetPackage, 102 /* PowerExemptionManager.REASON_PUSH_MESSAGING_OVER_QUOTA */,
+                                    "GOOGLE_C2DM", 2000);
+                        }
+                        if ((intent.getFlags() & Intent.FLAG_INCLUDE_STOPPED_PACKAGES) == 0) {
+                            intent.addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES);
+                        }
                     }
                 }
             }

@@ -1,4 +1,10 @@
 <resources>
     <string name="app_name">Fix HyperOS FCM reconnection</string>
     <string name="xposed_description">Remove HyperOS\'s restrictions on FCM connection-related broadcasts. System power consumption may increase when this module is enabled.</string>
+    <string name="settings_title">FCM wake whitelist</string>
+    <string name="settings_hint">Only the apps checked below will be woken / auto-started by FCM pushes. Unchecked apps will not be woken, even if notifications are on.</string>
+    <string name="select_all">Select all</string>
+    <string name="clear_all">Clear all</string>
+    <string name="search_hint">Search apps…</string>
+    <string name="show_system_apps">Show system apps</string>
 </resources>
