@@ -1,8 +1,10 @@
 package io.github.howard20181.hyperos.fcmlive;
 
 import android.annotation.SuppressLint;
+import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.ResolveInfo;
 import android.os.Build;
@@ -15,6 +17,7 @@ import androidx.annotation.RequiresApi;
 
 import java.lang.reflect.Method;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -30,6 +33,7 @@ public class Hooker extends XposedModule {
     private static final String GMS_PERSISTENT_PROCESS_NAME = "com.google.android.gms.persistent";
     private PackageClassLoader param;
     private final Set<String> hookedIds = new HashSet<>();
+    private Context systemContext;
 
     private record PackageClassLoader(String packageName, ClassLoader classLoader) {
     }
@@ -53,6 +57,11 @@ public class Hooker extends XposedModule {
     }
 
     private void hookSystemServer(ClassLoader classLoader) {
+        try {
+            hookAllowlist();
+        } catch (Exception t) {
+            log(Log.ERROR, TAG, "Failed to hook allowlist receiver", t);
+        }
         try {
             hookGreezeManagerService(classLoader);
         } catch (Exception t) {
@@ -120,18 +129,31 @@ public class Hooker extends XposedModule {
 
     @Override
     public boolean onHotReloading(@NonNull HotReloadingParam param) {
+        // Hot reload of system_server hooks is unreliable; a full reboot is the
+        // supported path. We still support reload below, but advise rebooting.
+        log(Log.WARN, TAG, "Hot reload requested — a full reboot is recommended for reliability");
         param.setSavedInstanceState(this.param);
         return true;
     }
 
     @Override
     public void onHotReloaded(@NonNull HotReloadedParam param) {
-        var isSystemServer = param.isSystemServer();
+        // Clean reload: reset id bookkeeping and remove every previous hook so the
+        // re-setup below starts fresh. Without this, old handles were never unhooked
+        // (hookedIds accumulated across passes) and stacked duplicate hooks made the
+        // reload appear ineffective.
+        hookedIds.clear();
+        param.getOldHookHandles().forEach(h -> {
+            try {
+                h.unhook();
+            } catch (Throwable ignored) {
+            }
+        });
         if (param.getSavedInstanceState() instanceof PackageClassLoader(
                 String packageName, ClassLoader classLoader
         )) {
             try {
-                if (isSystemServer) {
+                if (param.isSystemServer()) {
                     hookSystemServer(classLoader);
                 } else {
                     hookPackage(packageName, classLoader);
@@ -140,11 +162,6 @@ public class Hooker extends XposedModule {
                 log(Log.ERROR, TAG, "Hot reload failed", tr);
             }
         }
-        param.getOldHookHandles().forEach(h -> {
-            if (!hookedIds.contains(h.getId())) {
-                h.unhook();
-            }
-        });
     }
 
     private void hookGreezeManagerService(ClassLoader classLoader)
@@ -297,7 +314,10 @@ public class Hooker extends XposedModule {
                 if (callerPackageField.get(broadcastRecord) instanceof String callerPackage
                         && GMS_PACKAGE_NAME.equals(callerPackage) // BroadcastRecord.callerPackage nullable
                         && intentField.get(broadcastRecord) instanceof Intent intent
-                        && ACTION_REMOTE_INTENT.equals(intent.getAction())) {
+                        && ACTION_REMOTE_INTENT.equals(intent.getAction())
+                        // Auto-start only apps the user whitelisted; empty list = all.
+                        && intent.getPackage() instanceof String targetPackage
+                        && shouldWake(targetPackage)) {
                     return true;
                 }
             } catch (Exception e) {
@@ -411,6 +431,98 @@ public class Hooker extends XposedModule {
         return powerExemptionManager;
     }
 
+    /**
+     * A Context in system_server (ActivityThread.currentApplication()).
+     */
+    private Context getSystemContext() {
+        if (systemContext == null) {
+            try {
+                // ActivityThread.currentApplication() is hidden; call via reflection.
+                Class<?> activityThreadClass = Class.forName("android.app.ActivityThread");
+                Method currentApplication = activityThreadClass.getMethod("currentApplication");
+                if (currentApplication.invoke(null) instanceof Context ctx) {
+                    systemContext = ctx;
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        return systemContext;
+    }
+
+    /**
+     * Package names the user allows FCM to wake / auto-launch, kept in memory in
+     * system_server. Loaded from libxposed's cross-process remote preferences and
+     * refreshed whenever the app broadcasts {@link Prefs#ACTION_ALLOWLIST_CHANGED}.
+     */
+    private static volatile Set<String> sAllowlist = Collections.emptySet();
+
+    /** Re-read the allowlist from the shared remote preferences. */
+    private void loadAllowlistFromRemotePrefs() {
+        try {
+            Set<String> set = getRemotePreferences(Prefs.GROUP_CONFIG)
+                    .getStringSet(Prefs.KEY_ALLOWLIST, Collections.emptySet());
+            sAllowlist = set != null ? new HashSet<>(set) : new HashSet<>();
+        } catch (Exception e) {
+            log(Log.ERROR, TAG, "Failed to read remote allowlist", e);
+        }
+    }
+
+    /** Called from hookSystemServer: load the initial allowlist at boot. */
+    private void hookAllowlist() {
+        loadAllowlistFromRemotePrefs();
+    }
+
+    private boolean allowlistReceiverRegistered = false;
+
+    private Set<String> getFcmAllowlist() {
+        // Lazily register the refresh receiver on first real use. It can't be done
+        // in onSystemServerStarting because IActivityManager is null during early
+        // SystemServer startup, so registerReceiver would NPE. By the time any C2DM
+        // broadcast reaches here the system is fully up.
+        ensureAllowlistReceiver();
+        return new HashSet<>(sAllowlist);
+    }
+
+    /**
+     * Whether a target package should be woken / auto-started by FCM.
+     * An empty allowlist keeps the legacy behaviour (wake everything); once the
+     * user checks at least one app it becomes whitelist mode (only checked apps).
+     */
+    private boolean shouldWake(String targetPackage) {
+        Set<String> allowlist = getFcmAllowlist();
+        return allowlist.isEmpty() || allowlist.contains(targetPackage);
+    }
+
+    /** Register the receiver that re-reads the allowlist when the app updates it. */
+    private void ensureAllowlistReceiver() {
+        if (allowlistReceiverRegistered) {
+            return;
+        }
+        try {
+            Context sys = getSystemContext();
+            if (sys == null) {
+                return;
+            }
+            BroadcastReceiver receiver = new BroadcastReceiver() {
+                @Override
+                public void onReceive(Context context, Intent intent) {
+                    if (Prefs.ACTION_ALLOWLIST_CHANGED.equals(intent.getAction())) {
+                        loadAllowlistFromRemotePrefs();
+                    }
+                }
+            };
+            IntentFilter filter = new IntentFilter(Prefs.ACTION_ALLOWLIST_CHANGED);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                sys.registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED);
+            } else {
+                sys.registerReceiver(receiver, filter);
+            }
+            allowlistReceiverRegistered = true;
+        } catch (Exception e) {
+            log(Log.ERROR, TAG, "Failed to register allowlist receiver", e);
+        }
+    }
+
     private void hookActivityManagerService(ClassLoader classLoader) throws ClassNotFoundException,
             NoSuchMethodException, NoSuchFieldException {
         var ActivityManagerServiceClass = classLoader.loadClass("com.android.server.am.ActivityManagerService");
@@ -493,15 +605,18 @@ public class Hooker extends XposedModule {
                         && getInvoker(getRecordMethod).invoke(chain.getThisObject(), chain.getArg(0)) instanceof Object app
                         && infoField.get(app) instanceof ApplicationInfo info
                         && GMS_PACKAGE_NAME.equals(info.packageName)) {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
-                            && intent.getPackage() instanceof String packageName
-                            && mContextField.get(chain.getThisObject()) instanceof Context mContext) {
-                        getPowerExemptionManager(mContext).addToTemporaryAllowList(
-                                packageName, 102 /* PowerExemptionManager.REASON_PUSH_MESSAGING_OVER_QUOTA */,
-                                "GOOGLE_C2DM", 2000);
-                    }
-                    if ((intent.getFlags() & Intent.FLAG_INCLUDE_STOPPED_PACKAGES) == 0) {
-                        intent.addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES);
+                    // Wake / auto-start only apps the user whitelisted; empty list = all.
+                    if (intent.getPackage() instanceof String targetPackage
+                            && shouldWake(targetPackage)) {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+                                && mContextField.get(chain.getThisObject()) instanceof Context mContext) {
+                            getPowerExemptionManager(mContext).addToTemporaryAllowList(
+                                    targetPackage, 102 /* PowerExemptionManager.REASON_PUSH_MESSAGING_OVER_QUOTA */,
+                                    "GOOGLE_C2DM", 2000);
+                        }
+                        if ((intent.getFlags() & Intent.FLAG_INCLUDE_STOPPED_PACKAGES) == 0) {
+                            intent.addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES);
+                        }
                     }
                 }
             }

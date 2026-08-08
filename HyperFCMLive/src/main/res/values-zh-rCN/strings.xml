@@ -2,4 +2,10 @@
 <resources>
     <string name="app_name">修复澎湃系统谷歌推送重连</string>
     <string name="xposed_description">去除澎湃系统对谷歌推送连接相关广播的限制。启用模块后，系统耗电可能会增加。</string>
+    <string name="settings_title">FCM 唤醒白名单</string>
+    <string name="settings_hint">只有下方勾选的应用，才会被 FCM 推送唤醒 / 自动拉起。未勾选的应用不会被唤醒（即使已开启通知）。</string>
+    <string name="select_all">全选</string>
+    <string name="clear_all">清空</string>
+    <string name="search_hint">搜索应用…</string>
+    <string name="show_system_apps">显示系统应用</string>
 </resources>
