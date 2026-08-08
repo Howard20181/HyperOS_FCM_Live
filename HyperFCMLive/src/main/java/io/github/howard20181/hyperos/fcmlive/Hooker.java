@@ -459,10 +459,28 @@ public class Hooker extends XposedModule {
         }
     }
 
-    /** Called from hookSystemServer: load the allowlist and refresh on app updates. */
+    /** Called from hookSystemServer: load the initial allowlist at boot. */
     private void hookAllowlist() {
+        loadAllowlistFromRemotePrefs();
+    }
+
+    private boolean allowlistReceiverRegistered = false;
+
+    private Set<String> getFcmAllowlist() {
+        // Lazily register the refresh receiver on first real use. It can't be done
+        // in onSystemServerStarting because IActivityManager is null during early
+        // SystemServer startup, so registerReceiver would NPE. By the time any C2DM
+        // broadcast reaches here the system is fully up.
+        ensureAllowlistReceiver();
+        return new HashSet<>(sAllowlist);
+    }
+
+    /** Register the receiver that re-reads the allowlist when the app updates it. */
+    private void ensureAllowlistReceiver() {
+        if (allowlistReceiverRegistered) {
+            return;
+        }
         try {
-            loadAllowlistFromRemotePrefs();
             Context sys = getSystemContext();
             if (sys == null) {
                 return;
@@ -481,13 +499,10 @@ public class Hooker extends XposedModule {
             } else {
                 sys.registerReceiver(receiver, filter);
             }
+            allowlistReceiverRegistered = true;
         } catch (Exception e) {
-            log(Log.ERROR, TAG, "Failed to hook allowlist receiver", e);
+            log(Log.ERROR, TAG, "Failed to register allowlist receiver", e);
         }
-    }
-
-    private Set<String> getFcmAllowlist() {
-        return new HashSet<>(sAllowlist);
     }
 
     private void hookActivityManagerService(ClassLoader classLoader) throws ClassNotFoundException,
