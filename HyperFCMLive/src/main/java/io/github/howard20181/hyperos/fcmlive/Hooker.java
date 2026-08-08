@@ -129,18 +129,31 @@ public class Hooker extends XposedModule {
 
     @Override
     public boolean onHotReloading(@NonNull HotReloadingParam param) {
+        // Hot reload of system_server hooks is unreliable; a full reboot is the
+        // supported path. We still support reload below, but advise rebooting.
+        log(Log.WARN, TAG, "Hot reload requested — a full reboot is recommended for reliability");
         param.setSavedInstanceState(this.param);
         return true;
     }
 
     @Override
     public void onHotReloaded(@NonNull HotReloadedParam param) {
-        var isSystemServer = param.isSystemServer();
+        // Clean reload: reset id bookkeeping and remove every previous hook so the
+        // re-setup below starts fresh. Without this, old handles were never unhooked
+        // (hookedIds accumulated across passes) and stacked duplicate hooks made the
+        // reload appear ineffective.
+        hookedIds.clear();
+        param.getOldHookHandles().forEach(h -> {
+            try {
+                h.unhook();
+            } catch (Throwable ignored) {
+            }
+        });
         if (param.getSavedInstanceState() instanceof PackageClassLoader(
                 String packageName, ClassLoader classLoader
         )) {
             try {
-                if (isSystemServer) {
+                if (param.isSystemServer()) {
                     hookSystemServer(classLoader);
                 } else {
                     hookPackage(packageName, classLoader);
@@ -149,11 +162,6 @@ public class Hooker extends XposedModule {
                 log(Log.ERROR, TAG, "Hot reload failed", tr);
             }
         }
-        param.getOldHookHandles().forEach(h -> {
-            if (!hookedIds.contains(h.getId())) {
-                h.unhook();
-            }
-        });
     }
 
     private void hookGreezeManagerService(ClassLoader classLoader)
