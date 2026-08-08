@@ -315,9 +315,9 @@ public class Hooker extends XposedModule {
                         && GMS_PACKAGE_NAME.equals(callerPackage) // BroadcastRecord.callerPackage nullable
                         && intentField.get(broadcastRecord) instanceof Intent intent
                         && ACTION_REMOTE_INTENT.equals(intent.getAction())
-                        // Only auto-start apps the user explicitly whitelisted.
+                        // Auto-start only apps the user whitelisted; empty list = all.
                         && intent.getPackage() instanceof String targetPackage
-                        && getFcmAllowlist().contains(targetPackage)) {
+                        && shouldWake(targetPackage)) {
                     return true;
                 }
             } catch (Exception e) {
@@ -483,6 +483,16 @@ public class Hooker extends XposedModule {
         return new HashSet<>(sAllowlist);
     }
 
+    /**
+     * Whether a target package should be woken / auto-started by FCM.
+     * An empty allowlist keeps the legacy behaviour (wake everything); once the
+     * user checks at least one app it becomes whitelist mode (only checked apps).
+     */
+    private boolean shouldWake(String targetPackage) {
+        Set<String> allowlist = getFcmAllowlist();
+        return allowlist.isEmpty() || allowlist.contains(targetPackage);
+    }
+
     /** Register the receiver that re-reads the allowlist when the app updates it. */
     private void ensureAllowlistReceiver() {
         if (allowlistReceiverRegistered) {
@@ -595,9 +605,9 @@ public class Hooker extends XposedModule {
                         && getInvoker(getRecordMethod).invoke(chain.getThisObject(), chain.getArg(0)) instanceof Object app
                         && infoField.get(app) instanceof ApplicationInfo info
                         && GMS_PACKAGE_NAME.equals(info.packageName)) {
-                    // Only wake / auto-start apps the user explicitly whitelisted.
+                    // Wake / auto-start only apps the user whitelisted; empty list = all.
                     if (intent.getPackage() instanceof String targetPackage
-                            && getFcmAllowlist().contains(targetPackage)) {
+                            && shouldWake(targetPackage)) {
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
                                 && mContextField.get(chain.getThisObject()) instanceof Context mContext) {
                             getPowerExemptionManager(mContext).addToTemporaryAllowList(
