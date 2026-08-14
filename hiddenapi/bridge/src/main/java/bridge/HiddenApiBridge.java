@@ -15,6 +15,8 @@ import android.net.Uri;
 import android.os.UserHandle;
 import android.service.notification.StatusBarNotification;
 
+import com.android.server.am.ProcessRecord;
+
 public class HiddenApiBridge {
     public static Context StatusBarNotification_getPackageContext(@NonNull StatusBarNotification sbn, @NonNull Context systenUiContext) {
         return sbn.getPackageContext(systenUiContext);
@@ -102,5 +104,9 @@ public class HiddenApiBridge {
 
     public static boolean Intent_isExcludingStopped(Intent intent) {
         return intent.isExcludingStopped();
+    }
+
+    public static String ProcessRecord_getPackageName(ProcessRecord processRecord) {
+        return processRecord.getPackageName();
     }
 }

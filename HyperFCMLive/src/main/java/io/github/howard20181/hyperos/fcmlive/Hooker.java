@@ -4,21 +4,27 @@ import android.annotation.SuppressLint;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ApplicationInfo;
+import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.PowerExemptionManager;
 import android.util.Log;
+import android.util.Pair;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.RequiresApi;
 
+import com.android.server.am.ProcessRecord;
+
+import java.lang.reflect.Executable;
 import java.lang.reflect.Method;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
+import bridge.HiddenApiBridge;
 import io.github.libxposed.api.XposedModule;
 
 @SuppressLint("PrivateApi")
@@ -28,23 +34,25 @@ public class Hooker extends XposedModule {
     private static final String ACTION_REMOTE_INTENT = "com.google.android.c2dm.intent.RECEIVE";
     private static final String GMS_PACKAGE_NAME = "com.google.android.gms";
     private static final String GMS_PERSISTENT_PROCESS_NAME = "com.google.android.gms.persistent";
-    private PackageClassLoader param;
+    private Pair<String, ClassLoader> param;
     private final Set<String> hookedIds = new HashSet<>();
 
-    private record PackageClassLoader(String packageName, ClassLoader classLoader) {
-    }
+    private HookBuilder hookE(Executable executable) {
+        var builder = hook(executable);
 
-    private void setHookId(HookBuilder builder, String id) {
         if (getApiVersion() >= 102) {
+            var id = executable.toGenericString();
             builder.setId(id);
             hookedIds.add(id);
         }
+
+        return builder;
     }
 
     @Override
     public void onSystemServerStarting(@NonNull SystemServerStartingParam param) {
         var classLoader = param.getClassLoader();
-        this.param = new PackageClassLoader("system", classLoader);
+        this.param = Pair.create("system", classLoader);
         try {
             hookSystemServer(classLoader);
         } catch (Throwable tr) {
@@ -88,6 +96,16 @@ public class Hooker extends XposedModule {
         } catch (Exception e) {
             log(Log.ERROR, TAG, "Failed to hook ActivityManagerService", e);
         }
+        try {
+            hookInternationalPolicyManager(classLoader);
+        } catch (Exception e) {
+            log(Log.ERROR, TAG, "Failed to hook InternationalPolicyManager", e);
+        }
+        try {
+            hookProcessCleanerBase(classLoader);
+        } catch (Exception e) {
+            log(Log.ERROR, TAG, "Failed to hook ProcessCleanerBase", e);
+        }
     }
 
     @Override
@@ -95,7 +113,7 @@ public class Hooker extends XposedModule {
         if (!param.isFirstPackage()) return;
         var packageName = param.getPackageName();
         var classLoader = param.getClassLoader();
-        this.param = new PackageClassLoader(packageName, classLoader);
+        this.param = Pair.create(packageName, classLoader);
         try {
             hookPackage(packageName, classLoader);
         } catch (Throwable tr) {
@@ -127,9 +145,10 @@ public class Hooker extends XposedModule {
     @Override
     public void onHotReloaded(@NonNull HotReloadedParam param) {
         var isSystemServer = param.isSystemServer();
-        if (param.getSavedInstanceState() instanceof PackageClassLoader(
-                String packageName, ClassLoader classLoader
-        )) {
+        if (param.getSavedInstanceState() instanceof Pair<?, ?> pair
+                && pair.first instanceof String packageName
+                && pair.second instanceof ClassLoader classLoader) {
+            this.param = Pair.create(packageName, classLoader);
             try {
                 if (isSystemServer) {
                     hookSystemServer(classLoader);
@@ -159,8 +178,7 @@ public class Hooker extends XposedModule {
             var isAllowBroadcastMethod = GreezeManagerServiceClass.getDeclaredMethod("isAllowBroadcast", int.class, String.class, int.class, String.class, String.class);
             var getPackageNameFromUidMethod = GreezeManagerServiceClass.getDeclaredMethod("getPackageNameFromUid", int.class);
             getPackageNameFromUidMethod.setAccessible(true);
-            Utils.evaluate(hook(isAllowBroadcastMethod), h -> setHookId(h, isAllowBroadcastMethod.getName())
-            ).intercept(chain -> {
+            hookE(isAllowBroadcastMethod).intercept(chain -> {
                 String calleePkgName = chain.getArg(3) instanceof String calleeProcessName ? calleeProcessName : null;
                 try {
                     if (chain.getArg(2) instanceof Integer calleeUid
@@ -190,8 +208,7 @@ public class Hooker extends XposedModule {
         try {
             // boolean deferBroadcastForMiui(String action)
             var deferBroadcastForMiuiMethod = GreezeManagerServiceClass.getDeclaredMethod("deferBroadcastForMiui", String.class);
-            Utils.evaluate(hook(deferBroadcastForMiuiMethod), h -> setHookId(h, deferBroadcastForMiuiMethod.getName())
-            ).intercept(chain -> {
+            hookE(deferBroadcastForMiuiMethod).intercept(chain -> {
                 if (chain.getArg(0) instanceof String action
                         && CN_DEFER_BROADCAST.contains(action)) {
                     return false;
@@ -208,9 +225,7 @@ public class Hooker extends XposedModule {
         } catch (NoSuchMethodException ignored) {
             triggerGMSLimitActionMethod = GreezeManagerServiceClass.getDeclaredMethod("triggerGMSLimitAction");
         }
-        Method finalTriggerGMSLimitActionMethod = triggerGMSLimitActionMethod;
-        Utils.evaluate(hook(triggerGMSLimitActionMethod), h -> setHookId(h, finalTriggerGMSLimitActionMethod.getName())
-        ).intercept(chain -> {
+        hookE(triggerGMSLimitActionMethod).intercept(chain -> {
             if (!chain.getArgs().isEmpty()) {
                 var args = chain.getArgs().toArray();
                 args[0] = false;
@@ -230,8 +245,7 @@ public class Hooker extends XposedModule {
         var DomesticPolicyManagerClass = classLoader.loadClass("com.miui.server.greeze.DomesticPolicyManager");
         // boolean deferBroadcast(String action)
         var deferBroadcastMethod = DomesticPolicyManagerClass.getDeclaredMethod("deferBroadcast", String.class);
-        Utils.evaluate(hook(deferBroadcastMethod), h -> setHookId(h, deferBroadcastMethod.getName())
-        ).intercept(chain -> false);
+        hookE(deferBroadcastMethod).intercept(chain -> false);
         deoptimize(deferBroadcastMethod);
     }
 
@@ -242,8 +256,7 @@ public class Hooker extends XposedModule {
         mSystemBlackListField.setAccessible(true);
         var PowerStrategyModeConstructors = ListAppsManagerClass.getDeclaredConstructors();
         for (var constructor : PowerStrategyModeConstructors) {
-            Utils.evaluate(hook(constructor), h -> setHookId(h, constructor.getName())
-            ).intercept(chain -> {
+            hookE(constructor).intercept(chain -> {
                 try {
                     return chain.proceed();
                 } finally {
@@ -263,8 +276,7 @@ public class Hooker extends XposedModule {
             var isInWhiteListMethod = ListAppsManagerClass.getDeclaredMethod("isInWhiteList", String.class);
             var mUseDataWhiteListField = ListAppsManagerClass.getDeclaredField("mUseDataWhiteList");
             mUseDataWhiteListField.setAccessible(true);
-            Utils.evaluate(hook(isInWhiteListMethod), h -> setHookId(h, isInWhiteListMethod.getName())
-            ).intercept(chain -> {
+            hookE(isInWhiteListMethod).intercept(chain -> {
                 try {
                     var mUseDataWhiteList = (Set<String>) mUseDataWhiteListField.get(chain.getThisObject());
                     if (mUseDataWhiteList != null) {
@@ -290,8 +302,7 @@ public class Hooker extends XposedModule {
         var intentField = BroadcastRecordClass.getDeclaredField("intent");
         intentField.setAccessible(true);
         var checkApplicationAutoStartMethod = BroadcastQueueModernStubImplClass.getDeclaredMethod("checkApplicationAutoStart", BroadcastQueueClass, BroadcastRecordClass, ResolveInfo.class);
-        Utils.evaluate(hook(checkApplicationAutoStartMethod), h -> setHookId(h, checkApplicationAutoStartMethod.getName())
-        ).intercept(chain -> {
+        hookE(checkApplicationAutoStartMethod).intercept(chain -> {
             try {
                 var broadcastRecord = chain.getArg(1);
                 if (callerPackageField.get(broadcastRecord) instanceof String callerPackage
@@ -312,8 +323,7 @@ public class Hooker extends XposedModule {
             NoSuchMethodException {
         var ProcessPolicyClass = classLoader.loadClass("com.android.server.am.ProcessPolicy");
         var getWhiteListMethod = ProcessPolicyClass.getDeclaredMethod("getWhiteList", int.class);
-        Utils.evaluate(hook(getWhiteListMethod), h -> setHookId(h, getWhiteListMethod.getName())
-        ).intercept(chain -> {
+        hookE(getWhiteListMethod).intercept(chain -> {
             var result = chain.proceed();
             if (chain.getArg(0) instanceof Integer flags && (flags & 1) != 0) {
                 if (result instanceof List<?>) {
@@ -333,8 +343,7 @@ public class Hooker extends XposedModule {
         mNoNetworkBlackUidsField.setAccessible(true);
         var AwareResourceControlConstructors = AwareResourceControlClass.getDeclaredConstructors();
         for (var constructor : AwareResourceControlConstructors) {
-            Utils.evaluate(hook(constructor), h -> setHookId(h, constructor.getName())
-            ).intercept(chain -> {
+            hookE(constructor).intercept(chain -> {
                 try {
                     return chain.proceed();
                 } finally {
@@ -356,8 +365,7 @@ public class Hooker extends XposedModule {
             NoSuchMethodException {
         var NetdExecutorClass = classLoader.loadClass("com.miui.powerkeeper.utils.NetdExecutor");
         var initGmsChainMethod = NetdExecutorClass.getDeclaredMethod("initGmsChain", String.class, int.class, String.class);
-        Utils.evaluate(hook(initGmsChainMethod), h -> setHookId(h, initGmsChainMethod.getName())
-        ).intercept(chain -> {
+        hookE(initGmsChainMethod).intercept(chain -> {
             var args = chain.getArgs().toArray();
             args[2] = "ACCEPT";
             return chain.proceed(args);
@@ -370,16 +378,13 @@ public class Hooker extends XposedModule {
             return chain.proceed(args);
         };
         var updateGmsAlarmMethod = GmsObserverClass.getDeclaredMethod("updateGmsAlarm", boolean.class);
-        Utils.evaluate(hook(updateGmsAlarmMethod), h -> setHookId(h, updateGmsAlarmMethod.getName())
-        ).intercept(hooker);
+        hookE(updateGmsAlarmMethod).intercept(hooker);
         deoptimize(updateGmsAlarmMethod);
         var updateGmsNetWorkMethod = GmsObserverClass.getDeclaredMethod("updateGmsNetWork", boolean.class);
-        Utils.evaluate(hook(updateGmsNetWorkMethod), h -> setHookId(h, updateGmsNetWorkMethod.getName())
-        ).intercept(hooker);
+        hookE(updateGmsNetWorkMethod).intercept(hooker);
         deoptimize(updateGmsNetWorkMethod);
         var updateGoogleReletivesWakelockMethod = GmsObserverClass.getDeclaredMethod("updateGoogleReletivesWakelock", boolean.class);
-        Utils.evaluate(hook(updateGoogleReletivesWakelockMethod), h -> setHookId(h, updateGoogleReletivesWakelockMethod.getName())
-        ).intercept(hooker);
+        hookE(updateGoogleReletivesWakelockMethod).intercept(hooker);
         deoptimize(updateGoogleReletivesWakelockMethod);
     }
 
@@ -387,8 +392,7 @@ public class Hooker extends XposedModule {
             throws ClassNotFoundException, NoSuchMethodException {
         var GlobalFeatureConfigureHelperClass = classLoader.loadClass("com.miui.powerkeeper.provider.GlobalFeatureConfigureHelper");
         var getDozeWhiteListAppsMethod = GlobalFeatureConfigureHelperClass.getDeclaredMethod("getDozeWhiteListApps", Bundle.class);
-        Utils.evaluate(hook(getDozeWhiteListAppsMethod), h -> setHookId(h, getDozeWhiteListAppsMethod.getName())
-        ).intercept(chain -> {
+        hookE(getDozeWhiteListAppsMethod).intercept(chain -> {
             var result = chain.proceed();
             if (result instanceof List<?>) {
                 var whiteList = (List<String>) result;
@@ -486,8 +490,7 @@ public class Hooker extends XposedModule {
                     String[].class, int.class, Bundle.class,
                     boolean.class, boolean.class, int.class);
         }
-        Utils.evaluate(hook(broadcastMethod), h -> setHookId(h, broadcastMethod.getName())
-        ).intercept(chain -> {
+        hookE(broadcastMethod).intercept(chain -> {
             if (chain.getArg(intentArgIndex) instanceof Intent intent) {
                 if (ACTION_REMOTE_INTENT.equals(intent.getAction())
                         && getInvoker(getRecordMethod).invoke(chain.getThisObject(), chain.getArg(0)) instanceof Object app
@@ -508,5 +511,42 @@ public class Hooker extends XposedModule {
             return chain.proceed();
         });
         deoptimize(broadcastMethod);
+    }
+
+    private void hookInternationalPolicyManager(ClassLoader classLoader) throws ClassNotFoundException, NoSuchMethodException {
+        var InternationalPolicyManagerClass = classLoader.loadClass("com.miui.server.greeze.InternationalPolicyManager");
+        var systemServerCl = InternationalPolicyManagerClass.getClassLoader();
+        var isPushAppMethod = InternationalPolicyManagerClass.getDeclaredMethod("isPushApp", String.class);
+        hookE(isPushAppMethod).intercept(chain -> {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                var walker = StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE);
+                var match = walker.walk(frames -> frames
+                        .anyMatch(frame -> frame.getDeclaringClass() != null &&
+                                frame.getDeclaringClass().getClassLoader() == systemServerCl &&
+                                (frame.getMethodName().equals("isRestrictNet"))));
+                if (match) return false;
+            }
+            return chain.proceed();
+        });
+    }
+
+    private void hookProcessCleanerBase(ClassLoader classLoader) throws ClassNotFoundException, NoSuchMethodException, NoSuchFieldException {
+        var ProcessCleanerBaseClass = classLoader.loadClass("com.android.server.am.ProcessCleanerBase");
+        var ProcessRecordClass = classLoader.loadClass("com.android.server.am.ProcessRecord");
+        var ProcessManagerServiceClass = classLoader.loadClass("com.android.server.am.ProcessManagerService");
+        var mPkms = ProcessCleanerBaseClass.getDeclaredField("mPkms");
+        mPkms.setAccessible(true);
+        // boolean isForceStopEnable(ProcessRecord app, int policy, ProcessManagerService pms)
+        var isForceStopEnableMethod = ProcessCleanerBaseClass.getDeclaredMethod("isForceStopEnable", ProcessRecordClass, int.class, ProcessManagerServiceClass);
+        hookE(isForceStopEnableMethod).intercept(chain -> {
+            if (chain.getArg(0) instanceof ProcessRecord app && chain.getArg(1) instanceof Integer policy && policy != 13 && mPkms.get(chain.getArg(2)) instanceof PackageManager pm) {
+                var packageName = HiddenApiBridge.ProcessRecord_getPackageName(app);
+                var intent = new Intent(ACTION_REMOTE_INTENT);
+                intent.setPackage(packageName);
+                var isPushApp = !pm.queryBroadcastReceivers(intent, 0).isEmpty();
+                if (isPushApp) return false;
+            }
+            return chain.proceed();
+        });
     }
 }
