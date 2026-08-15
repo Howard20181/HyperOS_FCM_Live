@@ -15,8 +15,6 @@ import android.util.Pair;
 import androidx.annotation.NonNull;
 import androidx.annotation.RequiresApi;
 
-import com.android.server.am.ProcessRecord;
-
 import java.lang.reflect.Executable;
 import java.lang.reflect.Method;
 import java.util.Arrays;
@@ -24,7 +22,6 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
-import bridge.HiddenApiBridge;
 import io.github.libxposed.api.XposedModule;
 
 @SuppressLint("PrivateApi")
@@ -533,16 +530,17 @@ public class Hooker extends XposedModule {
     private void hookProcessCleanerBase(ClassLoader classLoader) throws ClassNotFoundException, NoSuchMethodException, NoSuchFieldException {
         var ProcessCleanerBaseClass = classLoader.loadClass("com.android.server.am.ProcessCleanerBase");
         var ProcessRecordClass = classLoader.loadClass("com.android.server.am.ProcessRecord");
+        var mGetApplicationInfo = ProcessRecordClass.getDeclaredMethod("getApplicationInfo");
         var ProcessManagerServiceClass = classLoader.loadClass("com.android.server.am.ProcessManagerService");
         var mPkms = ProcessManagerServiceClass.getDeclaredField("mPkms");
         mPkms.setAccessible(true);
         // boolean isForceStopEnable(ProcessRecord app, int policy, ProcessManagerService pms)
         var isForceStopEnableMethod = ProcessCleanerBaseClass.getDeclaredMethod("isForceStopEnable", ProcessRecordClass, int.class, ProcessManagerServiceClass);
         hookE(isForceStopEnableMethod).intercept(chain -> {
-            if (chain.getArg(0) instanceof ProcessRecord app && chain.getArg(1) instanceof Integer policy && policy != 13 && mPkms.get(chain.getArg(2)) instanceof PackageManager pm) {
-                var packageName = HiddenApiBridge.ProcessRecord_getPackageName(app);
+            if (chain.getArg(1) instanceof Integer policy && policy != 13 && mPkms.get(chain.getArg(2)) instanceof PackageManager pm) {
+                var info = (ApplicationInfo) getInvoker(mGetApplicationInfo).invoke(chain.getArg(0));
                 var intent = new Intent(ACTION_REMOTE_INTENT);
-                intent.setPackage(packageName);
+                intent.setPackage(info.packageName);
                 var isPushApp = !pm.queryBroadcastReceivers(intent, 0).isEmpty();
                 if (isPushApp) return false;
             }
