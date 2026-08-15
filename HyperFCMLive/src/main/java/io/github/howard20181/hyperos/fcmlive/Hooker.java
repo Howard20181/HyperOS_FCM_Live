@@ -534,7 +534,7 @@ public class Hooker extends XposedModule {
         var ProcessCleanerBaseClass = classLoader.loadClass("com.android.server.am.ProcessCleanerBase");
         var ProcessRecordClass = classLoader.loadClass("com.android.server.am.ProcessRecord");
         var ProcessManagerServiceClass = classLoader.loadClass("com.android.server.am.ProcessManagerService");
-        var mPkms = ProcessCleanerBaseClass.getDeclaredField("mPkms");
+        var mPkms = ProcessManagerServiceClass.getDeclaredField("mPkms");
         mPkms.setAccessible(true);
         // boolean isForceStopEnable(ProcessRecord app, int policy, ProcessManagerService pms)
         var isForceStopEnableMethod = ProcessCleanerBaseClass.getDeclaredMethod("isForceStopEnable", ProcessRecordClass, int.class, ProcessManagerServiceClass);
