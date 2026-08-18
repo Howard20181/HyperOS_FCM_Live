@@ -38,8 +38,7 @@ jobs:
         uses: gradle/actions/setup-gradle@v6
 
       - name: Build with Gradle
-        run: |
-          ./gradlew assemble
+        run: ./gradlew assemble
 
       - name: Upload release artifact
         uses: actions/upload-artifact@v7
