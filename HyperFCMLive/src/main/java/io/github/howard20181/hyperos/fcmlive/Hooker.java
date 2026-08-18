@@ -16,6 +16,7 @@ import androidx.annotation.NonNull;
 import androidx.annotation.RequiresApi;
 
 import java.lang.reflect.Executable;
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.Arrays;
 import java.util.HashSet;
@@ -44,6 +45,11 @@ public class Hooker extends XposedModule {
         }
 
         return builder;
+    }
+
+    @Override
+    public void onModuleLoaded(@NonNull ModuleLoadedParam param) {
+        UnsafeUtils.INSTANCE.setXposedModule(this);
     }
 
     @Override
@@ -141,6 +147,7 @@ public class Hooker extends XposedModule {
 
     @Override
     public void onHotReloaded(@NonNull HotReloadedParam param) {
+        UnsafeUtils.INSTANCE.setXposedModule(this);
         var isSystemServer = param.isSystemServer();
         if (param.getSavedInstanceState() instanceof Pair<?, ?> pair
                 && pair.first instanceof String packageName
@@ -229,8 +236,7 @@ public class Hooker extends XposedModule {
                 return chain.proceed(args);
             } else {
                 var mGmsLimitEnabled = GreezeManagerServiceClass.getDeclaredField("mGmsLimitEnabled");
-                mGmsLimitEnabled.setAccessible(true);
-                mGmsLimitEnabled.setBoolean(chain.getThisObject(), false);
+                UnsafeUtils.INSTANCE.setBooleanField(mGmsLimitEnabled, chain.getThisObject(), false);
                 return chain.proceed();
             }
         });
@@ -246,44 +252,67 @@ public class Hooker extends XposedModule {
         deoptimize(deferBroadcastMethod);
     }
 
-    private void hookListAppsManager(ClassLoader classLoader) throws ClassNotFoundException,
-            NoSuchFieldException {
+    private void hookListAppsManager(ClassLoader classLoader) throws ClassNotFoundException {
         var ListAppsManagerClass = classLoader.loadClass("com.miui.server.greeze.power.ListAppsManager");
-        var mSystemBlackListField = ListAppsManagerClass.getDeclaredField("mSystemBlackList");
-        mSystemBlackListField.setAccessible(true);
-        var PowerStrategyModeConstructors = ListAppsManagerClass.getDeclaredConstructors();
-        for (var constructor : PowerStrategyModeConstructors) {
-            hookE(constructor).intercept(chain -> {
-                try {
-                    return chain.proceed();
-                } finally {
+        Field mSystemBlackListField = null;
+        try {
+            mSystemBlackListField = ListAppsManagerClass.getDeclaredField("mSystemBlackList");
+        } catch (NoSuchFieldException e) {
+            try {
+                mSystemBlackListField = ListAppsManagerClass.getDeclaredField("SYSTEM_BLACK_LIST");
+            } catch (NoSuchFieldException ex) {
+                log(Log.ERROR, TAG, "Failed to find ListAppsManager.mSystemBlackList or ListAppsManager.SYSTEM_BLACK_LIST", e);
+            }
+        }
+        if (mSystemBlackListField != null) {
+            mSystemBlackListField.setAccessible(true);
+            var PowerStrategyModeConstructors = ListAppsManagerClass.getDeclaredConstructors();
+            for (var constructor : PowerStrategyModeConstructors) {
+                Field finalMSystemBlackListField = mSystemBlackListField;
+                hookE(constructor).intercept(chain -> {
                     try {
-                        var mSystemBlackList = (List<String>) mSystemBlackListField.get(chain.getThisObject());
-                        if (mSystemBlackList != null) {
-                            mSystemBlackList.remove(GMS_PACKAGE_NAME);
+                        return chain.proceed();
+                    } finally {
+                        try {
+                            var mSystemBlackList = (List<String>) finalMSystemBlackListField.get(chain.getThisObject());
+                            if (mSystemBlackList != null) {
+                                mSystemBlackList.remove(GMS_PACKAGE_NAME);
+                            }
+                        } catch (Exception e) {
+                            log(Log.ERROR, TAG, "Failed to modify system blacklist", e);
                         }
-                    } catch (Exception e) {
-                        log(Log.ERROR, TAG, "Failed to modify ListAppsManager.mSystemBlackList", e);
                     }
-                }
-            });
-            deoptimize(constructor);
+                });
+                deoptimize(constructor);
+            }
         }
         try {
             var isInWhiteListMethod = ListAppsManagerClass.getDeclaredMethod("isInWhiteList", String.class);
-            var mUseDataWhiteListField = ListAppsManagerClass.getDeclaredField("mUseDataWhiteList");
-            mUseDataWhiteListField.setAccessible(true);
-            hookE(isInWhiteListMethod).intercept(chain -> {
+            Field mUseDataWhiteListField = null;
+            try {
+                mUseDataWhiteListField = ListAppsManagerClass.getDeclaredField("mUseDataWhiteList");
+            } catch (NoSuchFieldException e) {
                 try {
-                    var mUseDataWhiteList = (Set<String>) mUseDataWhiteListField.get(chain.getThisObject());
-                    if (mUseDataWhiteList != null) {
-                        mUseDataWhiteList.add(GMS_PACKAGE_NAME);
-                    }
-                } catch (Exception e) {
-                    log(Log.ERROR, TAG, "Failed to modify ListAppsManager.SLEEP_MODE_LIST", e);
+                    mUseDataWhiteListField = ListAppsManagerClass.getDeclaredField("USE_DATA_WHITE_LIST");
+                } catch (NoSuchFieldException ex) {
+                    log(Log.ERROR, TAG, "Failed to find ListAppsManager.mUseDataWhiteList or ListAppsManager.USE_DATA_WHITE_LIST", e);
                 }
-                return chain.proceed();
-            });
+            }
+            if (mUseDataWhiteListField != null) {
+                mUseDataWhiteListField.setAccessible(true);
+                Field finalMUseDataWhiteListField = mUseDataWhiteListField;
+                hookE(isInWhiteListMethod).intercept(chain -> {
+                    try {
+                        var mUseDataWhiteList = (Set<String>) finalMUseDataWhiteListField.get(chain.getThisObject());
+                        if (mUseDataWhiteList != null) {
+                            mUseDataWhiteList.add(GMS_PACKAGE_NAME);
+                        }
+                    } catch (Exception e) {
+                        log(Log.ERROR, TAG, "Failed to modify use data whitelist", e);
+                    }
+                    return chain.proceed();
+                });
+            }
         } catch (NoSuchMethodException e) {
             log(Log.ERROR, TAG, "Failed to hook ListAppsManager#isInWhiteList", e);
         }
