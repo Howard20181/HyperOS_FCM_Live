@@ -387,31 +387,52 @@ public class Hooker extends XposedModule {
         }
     }
 
-    private void hookGmsObserver(ClassLoader classLoader) throws ClassNotFoundException,
-            NoSuchMethodException {
-        var NetdExecutorClass = classLoader.loadClass("com.miui.powerkeeper.utils.NetdExecutor");
-        var initGmsChainMethod = NetdExecutorClass.getDeclaredMethod("initGmsChain", String.class, int.class, String.class);
-        hookE(initGmsChainMethod).intercept(chain -> {
-            var args = chain.getArgs().toArray();
-            args[2] = "ACCEPT";
-            return chain.proceed(args);
-        });
-        deoptimize(initGmsChainMethod);
-        var GmsObserverClass = classLoader.loadClass("com.miui.powerkeeper.utils.GmsObserver");
+    private void hookGmsObserver(ClassLoader classLoader) {
+        try {
+            var netdExecutorClass = classLoader.loadClass("com.miui.powerkeeper.utils.NetdExecutor");
+            try {
+                var initGmsChainMethod = netdExecutorClass.getDeclaredMethod("initGmsChain", String.class, int.class, String.class);
+                hookE(initGmsChainMethod).intercept(chain -> {
+                    var args = chain.getArgs().toArray();
+                    args[2] = "ACCEPT";
+                    return chain.proceed(args);
+                });
+                deoptimize(initGmsChainMethod);
+            } catch (NoSuchMethodException e) {
+                log(Log.INFO, TAG, "NetdExecutor.initGmsChain not found; skipping legacy hook");
+            }
+        } catch (ClassNotFoundException e) {
+            log(Log.INFO, TAG, "NetdExecutor not found; skipping legacy hook");
+        }
+
+        Class<?> gmsObserverClass;
+        try {
+            gmsObserverClass = classLoader.loadClass("com.miui.powerkeeper.utils.GmsObserver");
+        } catch (ClassNotFoundException e) {
+            log(Log.INFO, TAG, "GmsObserver not found; skipping hooks");
+            return;
+        }
+
         Hooker hooker = chain -> {
             var args = chain.getArgs().toArray();
             args[0] = false;
             return chain.proceed(args);
         };
-        var updateGmsAlarmMethod = GmsObserverClass.getDeclaredMethod("updateGmsAlarm", boolean.class);
-        hookE(updateGmsAlarmMethod).intercept(hooker);
-        deoptimize(updateGmsAlarmMethod);
-        var updateGmsNetWorkMethod = GmsObserverClass.getDeclaredMethod("updateGmsNetWork", boolean.class);
-        hookE(updateGmsNetWorkMethod).intercept(hooker);
-        deoptimize(updateGmsNetWorkMethod);
-        var updateGoogleReletivesWakelockMethod = GmsObserverClass.getDeclaredMethod("updateGoogleReletivesWakelock", boolean.class);
-        hookE(updateGoogleReletivesWakelockMethod).intercept(hooker);
-        deoptimize(updateGoogleReletivesWakelockMethod);
+        hookGmsObserverMethod(gmsObserverClass, "updateGmsAlarm", hooker);
+        hookGmsObserverMethod(gmsObserverClass, "updateGmsNetWork", hooker);
+        hookGmsObserverMethod(gmsObserverClass, "updateGoogleReletivesWakelock", hooker);
+        // HyperOS 4 / PowerKeeper 4.2.00 replaces the legacy methods above with this one.
+        hookGmsObserverMethod(gmsObserverClass, "updateFrameworkGmsNetStatus", hooker);
+    }
+
+    private void hookGmsObserverMethod(Class<?> gmsObserverClass, String methodName, Hooker hooker) {
+        try {
+            var method = gmsObserverClass.getDeclaredMethod(methodName, boolean.class);
+            hookE(method).intercept(hooker);
+            deoptimize(method);
+        } catch (NoSuchMethodException e) {
+            log(Log.INFO, TAG, "GmsObserver." + methodName + " not found; skipping hook");
+        }
     }
 
     private void hookGlobalFeatureConfigureHelper(ClassLoader classLoader)
